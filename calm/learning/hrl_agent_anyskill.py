@@ -50,11 +50,11 @@ class HRLAgentAnyskill(common_agent.CommonAgent):
             llc_config = yaml.load(f, Loader=yaml.SafeLoader)
             llc_config_params = llc_config['params']
             self._latent_dim = llc_config_params['config']['latent_dim']
-        
+
         super().__init__(base_name, config)
 
         self._task_size = self.vec_env.env.task.get_task_obs_size()
-        
+
         self._llc_steps = config['llc_steps']
         llc_checkpoint = config['llc_checkpoint']
         assert(llc_checkpoint != "")
@@ -82,13 +82,13 @@ class HRLAgentAnyskill(common_agent.CommonAgent):
 
             obs, aux_rewards, curr_dones, infos = self.vec_env.step(llc_actions)
             obs[..., self.obs_shape[0] - self._task_size:] = self._text_latents
-
-            # state_embeds = infos['state_embeds'][:, :15, :3]
-            # image_features = self.anyskill.get_motion_embedding(state_embeds)
-
             # Render
             images = self.vec_env.env.task.render()
-            image_features = self.mlip_encoder.encode_images(images)
+            if images is not None:
+                image_features = self.mlip_encoder.encode_images(images)
+            else:
+                state_embeds = infos['state_embeds'][:, :15, :3]
+                image_features = self.anyskill.get_motion_embedding(state_embeds)
             image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)
             anyskill_rewards = self.vec_env.env.task.compute_anyskill_reward(image_features_norm, self._text_latents,
                                                                              self._latent_text_idx)
@@ -97,7 +97,7 @@ class HRLAgentAnyskill(common_agent.CommonAgent):
             rewards += curr_rewards
             done_count += curr_dones
             terminate_count += infos['terminate']
-            
+
             amp_obs = infos['amp_obs']
             curr_disc_reward = self._calc_disc_reward(amp_obs)
             disc_rewards += curr_disc_reward
@@ -215,7 +215,7 @@ class HRLAgentAnyskill(common_agent.CommonAgent):
             res_dict = self.get_action_values(self.obs)
 
             for k in update_list:
-                self.experience_buffer.update_data(k, n, res_dict[k]) 
+                self.experience_buffer.update_data(k, n, res_dict[k])
 
             if self.has_central_value:
                 self.experience_buffer.update_data('states', n, self.obs['states'])
@@ -243,7 +243,7 @@ class HRLAgentAnyskill(common_agent.CommonAgent):
             self.current_lengths += 1
             all_done_indices = self.dones.nonzero(as_tuple=False)
             done_indices = all_done_indices[::self.num_agents]
-  
+
             self.game_rewards.update(self.current_rewards[done_indices])
             self.game_lengths.update(self.current_lengths[done_indices])
             self.algo_observer.process_infos(infos, done_indices)
@@ -274,10 +274,10 @@ class HRLAgentAnyskill(common_agent.CommonAgent):
         batch_dict['played_frames'] = self.batch_size
 
         return batch_dict
-    
+
     def _load_config_params(self, config):
         super()._load_config_params(config)
-        
+
         self._task_reward_w = config['task_reward_w']
         self._disc_reward_w = config['disc_reward_w']
         self._style_reward_w = config['style_reward_w']
@@ -309,7 +309,7 @@ class HRLAgentAnyskill(common_agent.CommonAgent):
                                                                 dtype=torch.float32, device=self.ppo_device)
         self.experience_buffer.tensor_dict['sigmas'] = torch.zeros(batch_shape + (self._latent_dim,),
                                                                    dtype=torch.float32, device=self.ppo_device)
-        
+
         self.experience_buffer.tensor_dict['disc_rewards'] = torch.zeros_like(self.experience_buffer.tensor_dict['rewards'])
         self.experience_buffer.tensor_dict['style_rewards'] = torch.zeros_like(self.experience_buffer.tensor_dict['rewards'])
         self.tensor_list += ['disc_rewards', 'style_rewards']

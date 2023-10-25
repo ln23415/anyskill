@@ -32,11 +32,13 @@ from isaacgym import gymtorch
 
 from env.tasks.humanoid_amp_getup import HumanoidAMPGetup
 from isaacgym.torch_utils import *
+from isaacgym import gymapi
+import time
 
 
 class HumanoidRenderAnySKill(HumanoidAMPGetup):
     def __init__(self, cfg, sim_params, physics_engine, device_type, device_id, headless):
-        
+
         self._recovery_episode_prob = cfg["env"]["recoveryEpisodeProb"]
         self._recovery_steps = cfg["env"]["recoverySteps"]
         self._fall_init_prob = cfg["env"]["fallInitProb"]
@@ -54,7 +56,7 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
                          device_type=device_type,
                          device_id=device_id,
                          headless=headless)
-        
+
         self._recovery_counter = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
 
         self._generate_fall_states()
@@ -75,10 +77,10 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
     def render(self, sync_frame_time=False):
         super(HumanoidRenderAnySKill, self).render()
         self._frame += 1
-        if self.frame > 150 and self.frame%30 == 1:
+        if self._frame > 150 and self._frame % 30 == 1:
             self.gym.refresh_actor_root_state_tensor(self.sim)
-            char_root_pos = self._humanoid_root_states[:, 0:3].cpu().numpy()
-            char_root_rot = self._humanoid_root_states[:, 3:7].cpu().numpy()
+            char_root_pos = self._humanoid_root_states[:, 0:3]  # .cpu().numpy()
+            # char_root_rot = self._humanoid_root_states[:, 3:7].cpu().numpy()
             self._cam_prev_char_pos[:] = char_root_pos
             self.gym.render_all_camera_sensors(self.sim)
             self.gym.start_access_image_tensors(self.sim)
@@ -86,7 +88,7 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
             start = time.time()
             for env_id in range(self.num_envs):
                 cam_trans = self.gym.get_viewer_camera_transform(self.viewer, None)
-                cam_pos = np.array([cam_trans.p.x, cam_trans.p.y, cam_trans.p.z])
+                cam_pos = torch.tensor([cam_trans.p.x, cam_trans.p.y, cam_trans.p.z], device=self.device)
                 cam_delta = cam_pos - self._cam_prev_char_pos[env_id]
 
                 target = gymapi.Vec3(char_root_pos[env_id, 0], char_root_pos[env_id, 1], 1.0)
@@ -103,6 +105,10 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
                 # camera_rgba_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[env_id], camera_handle,
                 #                                                           gymapi.IMAGE_COLOR)
                 # torch_rgba_tensor = gymtorch.wrap_tensor(camera_rgba_tensor)
+                camera_rgba_tensor = self.gym.get_camera_image_gpu_tensor(self.sim, self.envs[env_id], camera_handle,
+                                                                          gymapi.IMAGE_COLOR)
+                self.torch_rgba_tensor[env_id] = gymtorch.wrap_tensor(camera_rgba_tensor)[:, :,
+                                                 :3].float()  # [224,224,3] -> IM -> [env,224,224,3]
             print("time of render {} frames' image: {}".format(env_id, (time.time() - start)))
 
             self.gym.end_access_image_tensors(self.sim)
@@ -144,13 +150,13 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
 
     def _generate_fall_states(self):
         max_steps = 150
-        
+
         env_ids = to_torch(np.arange(self.num_envs), device=self.device, dtype=torch.long)
         root_states = self._initial_humanoid_root_states[env_ids].clone()
         root_states[..., 3:7] = torch.randn_like(root_states[..., 3:7])
         root_states[..., 3:7] = torch.nn.functional.normalize(root_states[..., 3:7], dim=-1)
         self._humanoid_root_states[env_ids] = root_states
-        
+
         env_ids_int32 = self._humanoid_actor_ids[env_ids]
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
                                                      gymtorch.unwrap_tensor(self._root_states),
@@ -167,9 +173,9 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
         for i in range(max_steps):
             self.render()
             self.gym.simulate(self.sim)
-            
+
         self._refresh_sim_tensors()
-        
+
         self._fall_root_states = self._humanoid_root_states.clone()
         self._fall_root_states[:, 7:13] = 0
         self._fall_dof_pos = self._dof_pos.clone()
@@ -187,7 +193,6 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
         recovery_ids = env_ids[recovery_mask]
         if len(recovery_ids) > 0:
             self._reset_recovery_episode(recovery_ids)
-            
 
         nonrecovery_ids = env_ids[torch.logical_not(recovery_mask)]
         fall_probs = to_torch(np.array([self._fall_init_prob] * nonrecovery_ids.shape[0]), device=self.device)
@@ -195,7 +200,6 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
         fall_ids = nonrecovery_ids[fall_mask]
         if len(fall_ids) > 0:
             self._reset_fall_episode(fall_ids)
-            
 
         nonfall_ids = nonrecovery_ids[torch.logical_not(fall_mask)]
         if len(nonfall_ids) > 0:
@@ -207,7 +211,7 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
     def _reset_recovery_episode(self, env_ids):
         self._recovery_counter[env_ids] = self._recovery_steps
         return
-    
+
     def _reset_fall_episode(self, env_ids):
         fall_state_ids = torch.randint_like(env_ids, low=0, high=self._fall_root_states.shape[0])
         self._humanoid_root_states[env_ids] = self._fall_root_states[fall_state_ids]
@@ -216,7 +220,7 @@ class HumanoidRenderAnySKill(HumanoidAMPGetup):
         self._recovery_counter[env_ids] = self._recovery_steps
         self._reset_fall_env_ids = env_ids
         return
-    
+
     def _reset_envs(self, env_ids):
         self._reset_fall_env_ids = []
         super()._reset_envs(env_ids)
